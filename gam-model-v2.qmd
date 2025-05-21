@@ -1,0 +1,225 @@
+---
+title: "Heat Increment of Feeding in Dolphins"
+author: "Ioulia Koliopoulou, Stacy DeRuiter, Andreas Fahlman, et al."
+format: 
+  html:
+    embed-resources: true
+  pdf: default
+editor: source
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+
+library(mgcv)
+library(gratia)
+library(ggplot2)
+library(readxl)
+library(tidyverse)
+library(ggeffects)
+library(pracma)
+library(DHARMa)
+
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.width = 6,
+                      fig.height = 4.5)
+
+theme_set(theme_minimal(base_size = 12))
+```
+
+
+## Read in data
+
+```{r}
+HIF_data <- read_xlsx('data/updated_data.xlsx',
+                      .name_repair = 'unique_quiet') |>
+  mutate(animal = factor(animal))
+```
+
+## Model fitting
+
+```{r}
+HIF_model <- gam(oxygen_cons ~ s(exact, by = percentdailytotal, k = 10) + 
+                  # s(percentdailytotal, k = 4) +
+                   s(age, k = 4) + sex + s(pool_temp, k = 4) +
+                   s(animal, bs = 're'),
+                 data = HIF_data, 
+                 method = "ML", select = TRUE)
+summary(HIF_model)
+```
+
+## Model Checking
+
+```{r}
+gam.check(HIF_model)
+```
+
+```{r}
+plotResiduals(simulateResiduals(HIF_model))
+```
+
+```{r}
+acf(resid(HIF_model))
+```
+
+There are no apparent issues with model conditions (independence and normality of residuals, constant variance of residuals).
+
+## Hypothesis Testing
+
+```{r}
+anova(HIF_model)
+```
+
+
+## Model predictions
+
+### Partial Smooths
+This is a partial plot for the smooth for `Exact`:
+
+```{r}
+exact_partial_smooth <- smooth_estimates(HIF_model, select = 's(exact):percentdailytotal')
+draw(exact_partial_smooth) + xlab('Time (min.)')
+```
+
+In a partial plot, the units of the y-axis are the same as the units of the response, but the values are not actually the expected oxygen consumption -- it's the amount added on to (or taken away from) the oxygen consumption total due to the value of `exact`. It shows the shape of the relationship but the a realistic oxygen consumption total -- only a relative value.
+
+We can do the same for other predictors - but note that the ANOVA did not indicate evidence of a detectable association between any of them, and the oxygen consumption.
+
+```{r}
+exact_partial_smooth <- smooth_estimates(HIF_model, select = 's(percentdailytotal)')
+draw(exact_partial_smooth) + xlab('Proportion of Daily Total Calories')
+```
+
+
+```{r}
+exact_partial_smooth <- smooth_estimates(HIF_model, select = 's(age)')
+draw(exact_partial_smooth) + xlab('Age')
+```
+
+```{r}
+exact_partial_smooth <- smooth_estimates(HIF_model, select = 's(pool_temp)')
+draw(exact_partial_smooth) + xlab('Pool Temperature')
+```
+
+### Prediction plots
+Another way of visualizing the results of a GAM (or other regression model) is a prediction plot, where you select specific values at which to fix all the predictors other than `exact` time (age, proportion total calories, etc.) and then show predicted oxygen consumption given those values, and varying values of exact. Such a plot shows the same shape, but perhaps more easy-to-understand values on the y axis.
+
+The table below shows some such predictions, but the important part to us is the notes at the bottom, which specify what fixed values were used for other predictors:
+
+- percentdailytotal = 0.23
+- age = 21.4
+- sex: M (most common in data)
+- pool_temp: 22.8
+- the input `type = 'fixed'` means that the output will be population-level predictions for an average individual (so although one individual's name is listed below, it's not actually used -- predictions are for a hypothetical average dolphin, not for `Tt1`.)
+
+```{r}
+ggpredict(HIF_model, 
+          terms = 'exact',
+          type = 'fixed')
+```
+
+```{r}
+ggpredict(HIF_model, 
+          terms = 'exact [0:130]',
+          type = 'fixed') |>
+  plot() +
+  ggtitle("") + xlab('Time (min.)') + ylab('Oxygen Consumption')
+```
+
+In a prediction plot like this, the CIs will be wider because they include uncertainty in the intercept and the estimates of the effects of other predictors as well as just the one being shown.
+
+### Predictions for marginal means
+
+Another way to show predictions treats "other" predictors in the model in yet another way. In this approach quantitative predictors are set to the mean value observed in the data, but this is a weighted average across the observed values of all categorical predictors. The idea is to try to show the expected response value for "an average observation" (in some sense) in the actual data...
+
+This would look like:
+
+```{r}
+mmeans <- predict_response(HIF_model, terms = 'exact [0:130]',
+                 margin = 'marginalmeans') 
+
+mmeans |> 
+  plot()
+```
+
+(looks very similar to above but determined in a slightly different way; and this one *might* make more sense to overlay on top of the data...)
+
+
+## Data Plot with Model Fit
+
+### Setup
+
+Define colors and shapes to use for plotting
+
+```{r}
+kcal_colors <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3")
+shape_vector <- c("Tt1" = 1, "Tt2" = 2, "Tt3" = 3, "Tt4" = 4, 
+                  "Tt5" = 5, "Tt6" = 6, "Tt7" = 7, "Tt8" = 8)
+```
+
+
+### Data plot with maringal mean predictions
+
+If it was really desirable to "draw a line" showing the model expectations on top of the graph above, maybe the marginal means predictions would be the thing to show.
+
+```{r}
+oxygen_time_plot <- ggplot(HIF_data, 
+                           aes(x = exact, y = oxygen_cons)) +
+  geom_point(aes(color = factor(kcal), shape = animal), 
+             size = 2, 
+             stroke = 1.2) +
+  geom_line(data = mmeans,
+            aes(x = x, y = predicted),
+            color = 'black',
+            linewidth = 2) +
+  geom_ribbon(data = mmeans,
+              aes(ymin = conf.low, ymax = conf.high, x = x),
+              inherit.aes = FALSE,
+              fill = 'grey44', alpha = 0.2) +
+  labs(x = "Time (min)", 
+       y = "Oxygen Consumption (L / min)", 
+       color = "Energy Intake (kcal)", 
+       shape = "Animal ID") +
+  scale_color_manual(values = kcal_colors) +
+  scale_shape_manual(values = shape_vector) +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        axis.line = element_line(linewidth = 1)) +
+  scale_x_continuous(breaks = seq(0, 120, by = 20)) +
+  scale_y_continuous(breaks = seq(0, 2, by = 0.2))
+
+print(oxygen_time_plot)
+```
+
+## Area Under Curve
+
+The calculations below show the AUC under the black line in the graph above.
+
+For additional reference if needed, the initial value of oxygen consumption at time 0 is: `r mmeans$predicted[mmeans$x == 0]`
+
+### Cumulative AUC?
+
+It might be of interest to compute the AUC every so often (not just the total over all 100+ minutes)?
+
+If so -- and using the marginal mean expected $0_2$ consumption values, we could do something like:
+
+```{r}
+predicted_AUC <- data.frame(minutes = mmeans$x,
+                            AUC = cumtrapz(x = mmeans$x,
+                                           y = mmeans$predicted))
+max(predicted_AUC$AUC)
+```
+
+The total at 130 minutes is: `r max(predicted_AUC$AUC)`. Below the cumulative sums are shown:
+
+```{r}
+ggplot(predicted_AUC,
+       aes(x = minutes, y = AUC)) +
+  geom_path()
+```
+
+To compute this quantity with uncertainty, we would probably employ a parametric bootstrap (not done yet).
+
